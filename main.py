@@ -6,21 +6,24 @@ import numpy as np
 import random
 import time
 import hashlib
+import os  # Nhớ import os
 
 app = FastAPI(
     title="Vietlott Number Generator API",
     description="API gợi ý số Vietlott dựa trên thuật toán thống kê (No AI/ML)",
     version="2.0"
 )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cho phép tất cả các trang web truy cập
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # ==============================================================================
-# CORE LOGIC (GIỮ NGUYÊN)
+# CORE LOGIC
 # ==============================================================================
 
 def calculate_frequency(df, max_num):
@@ -28,19 +31,16 @@ def calculate_frequency(df, max_num):
     counts = pd.Series(all_numbers).value_counts().reindex(
         range(1, max_num + 1), fill_value=0
     )
-
     min_v, max_v = counts.min(), counts.max()
     if max_v - min_v == 0:
         norm_freq = pd.Series(0.5, index=counts.index)
     else:
         norm_freq = (counts - min_v) / (max_v - min_v)
-
     return counts, norm_freq
 
 def calculate_gap(df, max_num):
     total = len(df)
     gap = {}
-
     for num in range(1, max_num + 1):
         found = False
         for i in range(total - 1, -1, -1):
@@ -51,7 +51,6 @@ def calculate_gap(df, max_num):
                 break
         if not found:
             gap[num] = total
-
     gap = pd.Series(gap)
     min_g, max_g = gap.min(), gap.max()
     norm_gap = (gap - min_g) / (max_g - min_g) if max_g > min_g else pd.Series(0.5, index=gap.index)
@@ -89,12 +88,10 @@ def get_set_composition(mode):
         return {'hot': 2, 'warm': 2, 'cold': 2}
 
 def weighted_pick(nums, weights, k):
-    # Xử lý trường hợp tổng trọng số = 0 để tránh lỗi numpy
     if weights.sum() == 0:
-        probs = None # Uniform distribution
+        probs = None 
     else:
         probs = weights / weights.sum()
-    
     return np.random.choice(nums, size=k, replace=False, p=probs)
 
 def generate_number_sets_v2(final_scores, risk_mode, n_sets, seed=None):
@@ -109,20 +106,11 @@ def generate_number_sets_v2(final_scores, risk_mode, n_sets, seed=None):
     results = []
     for _ in range(n_sets):
         chosen = []
-        # Lưu ý: convert sang list để đảm bảo cộng được
         chosen += list(weighted_pick(hot.index.values, hot.values, comp['hot']))
         chosen += list(weighted_pick(warm.index.values, warm.values, comp['warm']))
         chosen += list(weighted_pick(cold.index.values, cold.values, comp['cold']))
         results.append(sorted(chosen))
-
     return results
-
-# Helper để tạo dữ liệu giả lập (Mock DB)
-def generate_dummy_data(max_num, rows=120):
-    dummy = []
-    for _ in range(rows):
-        dummy.append(sorted(random.sample(range(1, max_num + 1), 6)))
-    return pd.DataFrame(dummy, columns=['Num1','Num2','Num3','Num4','Num5','Num6'])
 
 # ==============================================================================
 # API ENDPOINT
@@ -136,7 +124,12 @@ def generate_numbers(
     seed: Optional[str] = Query(None, description="Seed cá nhân hóa (tùy chọn)")
 ):
     try:
-        # 1. Config Game Parameters
+        # 1. Config Game & Load Data
+        DATA_FILES = {
+            "645": "data/vietlott_645.csv",
+            "655": "data/vietlott_655.csv"
+        }
+        
         if game == "655":
             max_num = 55
             game_label = "6/55"
@@ -144,16 +137,29 @@ def generate_numbers(
             max_num = 45
             game_label = "6/45"
 
+        # --- ĐOẠN CODE ĐỌC CSV ĐƯỢC CHUYỂN VÀO ĐÂY ---
+        file_path = DATA_FILES.get(game)
+        
+        if not file_path or not os.path.exists(file_path):
+            # Nếu chạy trên máy local chưa có file data, fallback về dữ liệu giả để không crash
+            # Bạn có thể xóa đoạn fallback này nếu chắc chắn đã upload file
+            print(f"[WARN] Không tìm thấy file {file_path}, dùng Mock Data.")
+            df = generate_dummy_data_fallback(max_num) 
+        else:
+            # Đọc file CSV thật
+            df = pd.read_csv(file_path)
+            # Đảm bảo chỉ lấy đúng 6 cột số
+            required_cols = ['Num1','Num2','Num3','Num4','Num5','Num6']
+            if not all(col in df.columns for col in required_cols):
+                 raise HTTPException(status_code=500, detail=f"File CSV thiếu cột dữ liệu. Cần: {required_cols}")
+            df = df[required_cols]
+
         # 2. Xử lý Seed
         seed_int = None
         if seed:
             seed_int = int(hashlib.md5(seed.encode()).hexdigest(), 16) % (2**32)
 
-        # 3. Load Data (Sử dụng Mock Data vì chạy offline không có DB/CSV đi kèm)
-        # Trong thực tế, đoạn này sẽ load từ DB hoặc File CSV
-        df = generate_dummy_data(max_num)
-
-        # 4. Pipeline thuật toán
+        # 3. Pipeline thuật toán
         raw_counts, freq = calculate_frequency(df, max_num)
         gap = calculate_gap(df, max_num)
         hc = calculate_hot_cold(raw_counts)
@@ -163,19 +169,15 @@ def generate_numbers(
         # Tính điểm tổng hợp
         final_scores = (w1 * freq) + (w2 * hc) + (w3 * gap)
         
-        # Thêm noise (cần set seed tạm thời cho noise để nhất quán nếu có user seed)
         if seed_int:
             np.random.seed(seed_int) 
         
         final_scores += np.random.normal(0, 0.03, size=len(final_scores))
         final_scores = final_scores.clip(lower=0.001)
 
-        # 5. Sinh kết quả
-        # Reset seed lại cho bước sinh số để đảm bảo logic tách biệt
+        # 4. Sinh kết quả
         raw_results = generate_number_sets_v2(final_scores, mode, sets, seed_int)
 
-        # 6. Chuẩn hóa dữ liệu trả về (NumPy int64 -> Python int)
-        # JSON không hiểu được kiểu int64 của Numpy
         clean_results = []
         for subset in raw_results:
             clean_results.append([int(x) for x in subset])
@@ -188,6 +190,13 @@ def generate_numbers(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Hàm dự phòng nếu không tìm thấy file csv (để tránh lỗi Server Error 500 khi test)
+def generate_dummy_data_fallback(max_num, rows=100):
+    dummy = []
+    for _ in range(rows):
+        dummy.append(sorted(random.sample(range(1, max_num + 1), 6)))
+    return pd.DataFrame(dummy, columns=['Num1','Num2','Num3','Num4','Num5','Num6'])
 
 if __name__ == "__main__":
     import uvicorn
