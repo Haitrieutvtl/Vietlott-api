@@ -11,7 +11,13 @@ app = FastAPI(
     description="API gợi ý số Vietlott dựa trên thuật toán thống kê (No AI/ML)",
     version="2.0"
 )
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Cho phép tất cả các trang web truy cập
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # ==============================================================================
 # CORE LOGIC (GIỮ NGUYÊN)
 # ==============================================================================
